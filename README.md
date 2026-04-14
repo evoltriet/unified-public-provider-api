@@ -1,4 +1,4 @@
-# NPI Registry API
+# Unified Public Provider API
 
 Local Flask API and data-processing toolkit for working with CMS provider and organization data.
 
