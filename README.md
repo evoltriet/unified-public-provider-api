@@ -1,6 +1,6 @@
 # Unified Public Provider API
 
-Local Flask API and data-processing toolkit for working with CMS provider and organization data.
+Flask API and data-processing toolkit for working with CMS provider and organization data.
 
 The repository has two parallel tracks:
 
