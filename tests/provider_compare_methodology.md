@@ -1,12 +1,5 @@
 # Provider Comparison Methodology
 
-## Datasets
-- Test datasets:
-  - `data/test_data/non_optum_clinic_open_scheduling_database_*.csv`
-  - `data/test_data/optum_clinic_open_scheduling_database_*.csv`
-- Input dataset:
-  - any provider parquet or csv passed to the script CLI
-
 ## Provider Identity Matching
 Providers are compared in two gates after hospital scoping.
 
