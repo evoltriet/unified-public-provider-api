@@ -138,6 +138,15 @@ HOSPITAL_GENERIC_TOKENS = {
 
 HOSPITAL_TOKEN_FREQUENCY_LIMIT = 40
 
+PHONE_EXACT_MIN_FIRST_NAME_SIMILARITY = 0.84
+PHONE_EXACT_MIN_NAME_SIMILARITY = 0.65
+PHONE_EXACT_AMBIGUOUS_MIN_NAME_SIMILARITY = 0.70
+PHONE_EXACT_BASE_SCORE_GAP = 8.0
+PHONE_EXACT_MULTI_CANDIDATE_SCORE_GAP = 12.0
+PHONE_EXACT_NO_LAST_NAME_SCORE_GAP = 14.0
+EXACT_PHONE_MATCH_BONUS = 10.0
+LOW_NAME_PHONE_MATCH_PENALTY = 12.0
+
 PLACEHOLDER_CLINIC_NAMES = {
     "accepts new patients",
     "new patients",
@@ -1213,6 +1222,17 @@ def _score_candidates(
             scoped_candidates = in_scope_candidates
 
     scored = scoped_candidates.copy()
+    test_last_name = _safe_str(test_row.get("last_name_norm"))
+    name_similarity = scored["provider_name"].map(
+        lambda value: _name_similarity_score(test_row.get("name"), value)
+    )
+    exact_phone_match = (
+        (scored["phone_norm"].fillna("").astype("string") != "")
+        & (scored["phone_norm"].fillna("").astype("string") == _safe_str(test_row.get("phone_norm")))
+    )
+    last_name_exact = (
+        scored["last_name_norm"].fillna("").astype("string") == test_last_name
+    )
     exact_name_bonus = (
         scored["full_name_key"].fillna("").astype("string") == _safe_str(test_row.get("full_name_key"))
     ).astype("float64") * 100.0
@@ -1222,10 +1242,7 @@ def _score_candidates(
     loose_specialty_bonus = scored["specialty"].map(
         lambda value: 10.0 if _specialty_match_loose(test_row.get("specialty"), value) else 0.0
     )
-    exact_phone_bonus = (
-        (scored["phone_norm"].fillna("").astype("string") != "")
-        & (scored["phone_norm"].fillna("").astype("string") == _safe_str(test_row.get("phone_norm")))
-    ).astype("float64") * 15.0
+    exact_phone_bonus = exact_phone_match.astype("float64") * EXACT_PHONE_MATCH_BONUS
     mapped_hospital_bonus = pd.Series(0.0, index=scored.index)
     if mapped_input_hospital_canonicals:
         mapped_hospital_bonus = (
@@ -1237,6 +1254,11 @@ def _score_candidates(
     address_zip_state_bonus = scored["address"].map(
         lambda value: 5.0 if _address_match_zip_state(test_row.get("clinic_address"), value) else 0.0
     )
+    low_name_phone_penalty = (
+        exact_phone_match
+        & ~last_name_exact
+        & (name_similarity < 0.5)
+    ).astype("float64") * LOW_NAME_PHONE_MATCH_PENALTY
     reuse_penalty = pd.Series(0.0, index=scored.index)
     if matched_input_use_counts:
         reuse_penalty = scored.index.to_series().map(lambda idx: float(matched_input_use_counts.get(int(idx), 0)) * 8.0)
@@ -1256,6 +1278,7 @@ def _score_candidates(
         + mapped_hospital_bonus
         + address_bonus
         + address_zip_state_bonus
+        - low_name_phone_penalty
         - reuse_penalty
     )
     scored = scored.sort_values(
@@ -1393,6 +1416,54 @@ def _field_led_candidates(
     return annotated.head(0).copy()
 
 
+def _field_led_phone_exact_candidates(
+    test_row: pd.Series,
+    candidates: pd.DataFrame,
+    mapped_input_hospital_canonicals: Optional[set[str]],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "rejected_reason": "",
+        "raw_phone_candidate_count": 0,
+        "phone_candidate_count": 0,
+        "has_exact_last_name_candidate": False,
+    }
+    annotated = _annotate_candidate_support(test_row, candidates, mapped_input_hospital_canonicals)
+    if annotated.empty:
+        diagnostics["rejected_reason"] = "no_candidates"
+        return annotated, diagnostics
+    if mapped_input_hospital_canonicals:
+        in_scope = annotated[annotated["_mapped_hospital"]].copy()
+        if not in_scope.empty:
+            annotated = in_scope
+    annotated = annotated[annotated["_phone_match"]].copy()
+    diagnostics["raw_phone_candidate_count"] = int(len(annotated))
+    if annotated.empty:
+        diagnostics["rejected_reason"] = "no_phone_exact"
+        return annotated, diagnostics
+
+    annotated["_phone_led_name_guard_passed"] = (
+        annotated["_last_name_exact"]
+        | (annotated["_first_name_similarity"] >= PHONE_EXACT_MIN_FIRST_NAME_SIMILARITY)
+        | (annotated["_name_similarity"] >= PHONE_EXACT_MIN_NAME_SIMILARITY)
+    )
+    annotated = annotated[annotated["_phone_led_name_guard_passed"]].copy()
+    if annotated.empty:
+        diagnostics["rejected_reason"] = "name_guard"
+        return annotated, diagnostics
+
+    has_exact_last_name_candidate = bool(annotated["_last_name_exact"].any())
+    diagnostics["has_exact_last_name_candidate"] = has_exact_last_name_candidate
+    diagnostics["phone_candidate_count"] = int(len(annotated))
+    annotated["_has_exact_last_name_candidate"] = has_exact_last_name_candidate
+    annotated["_phone_candidate_count"] = int(len(annotated))
+    if len(annotated) > 1 and not has_exact_last_name_candidate:
+        best_name_similarity = float(annotated["_name_similarity"].max())
+        if best_name_similarity < PHONE_EXACT_AMBIGUOUS_MIN_NAME_SIMILARITY:
+            diagnostics["rejected_reason"] = "ambiguous_shared_phone_weak_name"
+            return annotated.head(0).copy(), diagnostics
+    return annotated, diagnostics
+
+
 def _compare_single_dataset(
     test_df: pd.DataFrame,
     hospital_scoped_input_df: pd.DataFrame,
@@ -1424,6 +1495,8 @@ def _compare_single_dataset(
         "name_plus_field": 0,
         "field_led": 0,
     }
+    phone_exact_rejected_name_guard_count = 0
+    phone_exact_rejected_ambiguous_count = 0
     retrieval_audit_rows: list[dict[str, Any]] = []
 
     input_by_full_name = _build_group_index(hospital_scoped_input_df, "full_name_key")
@@ -1480,6 +1553,7 @@ def _compare_single_dataset(
         match_strategy = "unmatched"
         match_strategy_bucket = ""
         retrieval_bucket = ""
+        phone_exact_context: dict[str, Any] = {}
         seen_stage_keys: set[tuple[str, str]] = set()
 
         for strategy_name, stage_bucket, key_column, index_map, invalid_values in [
@@ -1589,24 +1663,34 @@ def _compare_single_dataset(
                 candidate_index = input_by_phone.get(phone_key)
                 if candidate_index is not None:
                     retrieval_candidates = hospital_scoped_input_df.loc[candidate_index]
-                    retrieval_candidates = _field_led_candidates(
+                    retrieval_candidates, phone_exact_diagnostics = _field_led_phone_exact_candidates(
                         test_row,
                         retrieval_candidates,
                         mapped_input_hospitals,
-                        mode="phone_exact",
                     )
+                    phone_exact_context = phone_exact_diagnostics
+                    if phone_exact_diagnostics.get("rejected_reason") == "name_guard":
+                        phone_exact_rejected_name_guard_count += 1
+                    elif phone_exact_diagnostics.get("rejected_reason") == "ambiguous_shared_phone_weak_name":
+                        phone_exact_rejected_ambiguous_count += 1
                     _register_candidates(
                         test_hospital_name,
                         "field_led",
                         retrieval_candidates,
                         stage_bucket="fallback_weak",
                     )
+                    phone_score_gap = PHONE_EXACT_BASE_SCORE_GAP
+                    if int(phone_exact_diagnostics.get("phone_candidate_count", 0) or 0) > 1:
+                        phone_score_gap = max(phone_score_gap, PHONE_EXACT_MULTI_CANDIDATE_SCORE_GAP)
+                    if not bool(phone_exact_diagnostics.get("has_exact_last_name_candidate")):
+                        phone_score_gap = max(phone_score_gap, PHONE_EXACT_NO_LAST_NAME_SCORE_GAP)
                     best_info = _choose_best_candidate(
                         test_row,
                         retrieval_candidates,
                         mapped_input_hospitals,
                         matched_input_use_counts=matched_input_use_counts,
                         require_score_gap=True,
+                        min_score_gap=phone_score_gap,
                     )
                     if best_info is not None:
                         match_strategy = "field_led_phone_exact"
@@ -1788,10 +1872,27 @@ def _compare_single_dataset(
                     "input_specialty": best.get("specialty", ""),
                     "input_phone": best.get("phone", ""),
                     "input_address": best.get("address", ""),
-                    "name_similarity": round(_name_similarity_score(test_row.get("name"), best.get("provider_name")), 4),
+                    "name_similarity": round(float(best.get("_name_similarity", _name_similarity_score(test_row.get("name"), best.get("provider_name")))), 4),
+                    "last_name_exact": bool(best.get("_last_name_exact", False)),
+                    "first_name_similarity": round(float(best.get("_first_name_similarity", 0.0) or 0.0), 4),
                     "specialty_match_loose": specialty_match_loose,
                     "address_match_zip_state": address_match_zip_state,
                     "phone_match": phone_match,
+                    "phone_candidate_count": (
+                        int(phone_exact_context.get("phone_candidate_count", 0) or 0)
+                        if match_strategy == "field_led_phone_exact"
+                        else ""
+                    ),
+                    "has_exact_last_name_candidate": (
+                        bool(phone_exact_context.get("has_exact_last_name_candidate"))
+                        if match_strategy == "field_led_phone_exact"
+                        else ""
+                    ),
+                    "phone_led_name_guard_passed": (
+                        bool(best.get("_phone_led_name_guard_passed", False))
+                        if match_strategy == "field_led_phone_exact"
+                        else ""
+                    ),
                     "candidate_score": best_info["candidate_score"],
                     "second_best_candidate_score": best_info["second_best_candidate_score"],
                     "candidate_score_gap": best_info["score_gap"],
@@ -1989,6 +2090,8 @@ def _compare_single_dataset(
         "matched_provider_count_exact": exact_count,
         "matched_provider_count_relaxed": relaxed_count,
         "matched_provider_count_fallback_weak": fallback_weak_count,
+        "phone_exact_rejected_name_guard_count": phone_exact_rejected_name_guard_count,
+        "phone_exact_rejected_ambiguous_count": phone_exact_rejected_ambiguous_count,
         "matched_provider_pct_of_test": matched_pct_of_test,
         "fully_matched_count": fully_matched_count,
         "partially_matched_count": partially_matched_count,
@@ -2778,9 +2881,14 @@ def build_retrieval_audit_df(summaries: list[dict[str, Any]]) -> pd.DataFrame:
                 "input_phone",
                 "input_address",
                 "name_similarity",
+                "last_name_exact",
+                "first_name_similarity",
                 "specialty_match_loose",
                 "address_match_zip_state",
                 "phone_match",
+                "phone_candidate_count",
+                "has_exact_last_name_candidate",
+                "phone_led_name_guard_passed",
                 "candidate_score",
                 "second_best_candidate_score",
                 "candidate_score_gap",
