@@ -22,8 +22,10 @@ from cms_enrollment_common import (
     column_as_string,
     download_assets,
     ensure_directories,
+    find_latest_raw_csv,
     find_latest_parquet,
     new_session,
+    save_parquet_from_csv,
     warn_if_schema_drift,
 )
 
@@ -76,6 +78,27 @@ def find_latest_enrollment_parquet() -> Path | None:
     )
 
 
+def recover_enrollment_parquet_from_raw() -> Path | None:
+    raw_csv = find_latest_raw_csv(
+        include_patterns=[r"ENROLL"],
+        exclude_patterns=[r"REASSIGN", r"PRACTICE", r"LOCATION", r"pecos_orgs"],
+    )
+    if raw_csv is None:
+        return None
+
+    parquet_path = PARQUET_DIR / f"{raw_csv.stem}.parquet"
+    logger.info("Recovering enrollment parquet from existing raw CSV: %s", raw_csv)
+    df = save_parquet_from_csv(raw_csv, parquet_path, logger=logger)
+    warn_if_schema_drift(df, raw_csv.stem, logger)
+    logger.info(
+        "Recovered enrollment parquet: %s (%s rows, %s columns)",
+        parquet_path,
+        f"{len(df):,}",
+        len(df.columns),
+    )
+    return parquet_path
+
+
 def main():
     ensure_directories()
     session = new_session()
@@ -109,8 +132,10 @@ def main():
 
     enrollment_parquet = find_latest_enrollment_parquet()
     if enrollment_parquet is None or not enrollment_parquet.exists():
-        logger.error("Could not find an enrollment parquet to build PECOS org rows from.")
-        return
+        enrollment_parquet = recover_enrollment_parquet_from_raw()
+        if enrollment_parquet is None or not enrollment_parquet.exists():
+            logger.error("Could not find an enrollment parquet or recover one from raw CSV.")
+            return
 
     build_orgs_parquet(enrollment_parquet)
 

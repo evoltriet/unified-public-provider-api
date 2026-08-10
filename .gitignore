@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments and local settings
+.env
+.venv/
+venv/
+env/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Runtime output
+logs/
+*.log
+data/raw/
+data/parquet/
+data/processed_data/
+data/analysis/
+data/hashes/
+data/meta/
+data/test_data/
+data/*.json
+data/*.csv
+data/*.parquet
+data/*.tar
+data/*.zip
+
+# Public, intentionally tracked data/config files
+!data/README.md
+!data/taxonomy_lookup.json
+!data/config/
+!data/config/*.csv

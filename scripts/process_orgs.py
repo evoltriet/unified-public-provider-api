@@ -6,6 +6,7 @@ Process PECOS-style org/location rows into clinic/system entities.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from provider_pipeline_common import (
     add_mode_completion,
     address_similarity,
     build_logger,
+    canonical_entity_name,
     coalesce_columns,
     combine_address,
     ensure_dirs,
@@ -30,6 +32,7 @@ from provider_pipeline_common import (
     location_url,
     make_hash_id,
     name_similarity,
+    normalize_address_line1,
     normalize_text,
     parse_date_series,
     parquet_columns,
@@ -94,6 +97,15 @@ class OrgProcessor:
 
     def output_path(self, data_date: str) -> Path:
         return self.processed_dir / f"pecos_orgs_processed_{data_date}.parquet"
+
+    def clinic_rollup_path(self, data_date: str) -> Path:
+        return self.processed_dir / f"pecos_clinic_rollup_{data_date}.parquet"
+
+    def system_rollup_path(self, data_date: str) -> Path:
+        return self.processed_dir / f"pecos_system_rollup_{data_date}.parquet"
+
+    def alias_overrides_path(self) -> Path:
+        return self.data_dir / "config" / "pecos_system_alias_overrides.csv"
 
     def metadata_path(self, data_date: str) -> Path:
         return self.processed_dir / f"pecos_orgs_processed_{data_date}_metadata.json"
@@ -193,6 +205,372 @@ class OrgProcessor:
         ).map(lambda value: safe_phone(value) or "")
         return out
 
+    def _load_system_alias_overrides(self) -> pd.DataFrame:
+        path = self.alias_overrides_path()
+        columns = ["alias_name", "alias_canonical", "target_system_name", "target_system_id", "action", "status", "reason"]
+        if not path.exists():
+            return pd.DataFrame(columns=columns)
+        aliases = pd.read_csv(path, dtype=str).fillna("")
+        for column in columns:
+            if column not in aliases.columns:
+                aliases[column] = ""
+            aliases[column] = aliases[column].astype("string").fillna("").str.strip()
+        aliases["alias_canonical"] = aliases["alias_canonical"].where(
+            aliases["alias_canonical"].ne(""),
+            aliases["alias_name"].map(canonical_entity_name),
+        )
+        aliases["target_system_id"] = aliases["target_system_id"].astype("string").fillna("").str.strip()
+        aliases = aliases[
+            aliases["status"].str.lower().eq("approved")
+            & aliases["action"].str.lower().isin(["merge_to_target", "block_generic_match"])
+            & aliases["alias_canonical"].ne("")
+        ].copy()
+        if aliases.empty:
+            return aliases
+        aliases = aliases.drop_duplicates(subset=["alias_canonical", "action"], keep="first")
+        LOGGER.info("Loaded %s approved PECOS system alias override rows from %s", f"{len(aliases):,}", path)
+        return aliases
+
+    def system_alias_override_signature(self) -> str:
+        aliases = self._load_system_alias_overrides()
+        if aliases.empty:
+            return ""
+        columns = ["alias_canonical", "target_system_name", "target_system_id", "action", "status"]
+        payload = aliases[columns].sort_values(columns).to_csv(index=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _apply_system_alias_overrides(self, df: pd.DataFrame) -> pd.DataFrame:
+        aliases = self._load_system_alias_overrides()
+        out = df.copy()
+        if "system_alias_action" not in out.columns:
+            out["system_alias_action"] = ""
+        if "system_alias_reason" not in out.columns:
+            out["system_alias_reason"] = ""
+        if "system_alias_blocked_generic" not in out.columns:
+            out["system_alias_blocked_generic"] = False
+        if aliases.empty:
+            out["system_alias_blocked_generic"] = out["system_alias_blocked_generic"].fillna(False).astype(bool)
+            return out
+
+        system_key = out["system_name"].astype("string").fillna("").map(canonical_entity_name)
+        merge_rows = aliases[aliases["action"].str.lower().eq("merge_to_target")].copy()
+        merge_rows = merge_rows[merge_rows["target_system_id"].ne("") & merge_rows["target_system_name"].ne("")]
+        if not merge_rows.empty:
+            merge_map = merge_rows.drop_duplicates("alias_canonical").set_index("alias_canonical")
+            matched = system_key.isin(merge_map.index)
+            if matched.any():
+                out.loc[matched, "system_alias_action"] = "merge_to_target"
+                out.loc[matched, "system_alias_reason"] = system_key[matched].map(merge_map["reason"]).fillna("")
+                out.loc[matched, "system_id"] = system_key[matched].map(merge_map["target_system_id"]).fillna(out.loc[matched, "system_id"])
+                out.loc[matched, "system_name"] = system_key[matched].map(merge_map["target_system_name"]).fillna(out.loc[matched, "system_name"])
+                out.loc[matched, "system_display_name"] = out.loc[matched, "system_name"]
+                LOGGER.info("Applied merge_to_target PECOS system aliases to %s org rows", f"{int(matched.sum()):,}")
+
+        block_rows = aliases[aliases["action"].str.lower().eq("block_generic_match")].copy()
+        if not block_rows.empty:
+            blocked_canonicals = set(block_rows["alias_canonical"])
+            blocked = system_key.isin(blocked_canonicals)
+            if blocked.any():
+                block_map = block_rows.drop_duplicates("alias_canonical").set_index("alias_canonical")
+                out.loc[blocked, "system_alias_action"] = out.loc[blocked, "system_alias_action"].where(
+                    out.loc[blocked, "system_alias_action"].astype("string").fillna("").str.strip().ne(""),
+                    "block_generic_match",
+                )
+                out.loc[blocked, "system_alias_reason"] = system_key[blocked].map(block_map["reason"]).fillna("")
+                out.loc[blocked, "system_alias_blocked_generic"] = True
+                LOGGER.info("Applied block_generic_match PECOS system aliases to %s org rows", f"{int(blocked.sum()):,}")
+
+        out["system_alias_blocked_generic"] = out["system_alias_blocked_generic"].fillna(False).astype(bool)
+        return out
+
+    @staticmethod
+    def _row_completeness(df: pd.DataFrame, columns: list[str]) -> pd.Series:
+        score = pd.Series(0, index=df.index, dtype="int64")
+        for column in columns:
+            if column not in df.columns:
+                continue
+            score = score + df[column].astype("string").fillna("").str.strip().ne("").astype("int64")
+        return score
+
+    def _build_rollups(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        work = df.copy()
+        for column in [
+            "clinic_id",
+            "clinic_name",
+            "clinic_display_name",
+            "system_id",
+            "system_name",
+            "system_display_name",
+            "org_npi",
+            "org_entity_id",
+            "source_enrollment_id",
+            "practice_address_1",
+            "practice_address_2",
+            "practice_city",
+            "practice_state",
+            "practice_zip5",
+            "practice_phone",
+            "taxonomy_desc_primary",
+            "website",
+            "website_source",
+            "website_confidence",
+            "system_alias_action",
+            "system_alias_reason",
+        ]:
+            if column not in work.columns:
+                work[column] = ""
+            work[column] = work[column].astype("string").fillna("").str.strip()
+        if "system_alias_blocked_generic" not in work.columns:
+            work["system_alias_blocked_generic"] = False
+        work["system_alias_blocked_generic"] = work["system_alias_blocked_generic"].fillna(False).astype(bool)
+        for column in ["provider_count", "provider_count_entity"]:
+            if column not in work.columns:
+                work[column] = 0
+            work[column] = pd.to_numeric(work[column], errors="coerce").fillna(0).astype("int64")
+        if "is_hospital" not in work.columns:
+            work["is_hospital"] = False
+        work["is_hospital"] = work["is_hospital"].fillna(False).astype(bool)
+        work["clinic_name_canonical"] = work["clinic_name"].map(canonical_entity_name)
+        work["system_name_canonical"] = work["system_name"].map(canonical_entity_name)
+        work["clinic_generic_name_flag"] = work["clinic_name"].ne("") & (
+            work["clinic_name_canonical"].eq("") | work["clinic_name_canonical"].str.split().str.len().fillna(0).le(1)
+        )
+        work["system_generic_name_flag"] = work["system_name"].ne("") & (
+            work["system_name_canonical"].eq("") | work["system_name_canonical"].str.split().str.len().fillna(0).le(1)
+        )
+        work["system_generic_name_flag"] = work["system_generic_name_flag"] | work["system_alias_blocked_generic"]
+        work["rollup_address_key"] = (
+            work["practice_address_1"].map(normalize_address_line1)
+            + "|"
+            + work["practice_city"].map(normalize_text)
+            + "|"
+            + work["practice_state"].map(normalize_text)
+            + "|"
+            + work["practice_zip5"].map(zip5)
+        )
+        address_counts = (
+            work[work["rollup_address_key"].str.replace("|", "", regex=False).ne("")]
+            .groupby("rollup_address_key")["clinic_id"]
+            .nunique()
+        )
+        work["duplicate_address_group_size"] = work["rollup_address_key"].map(address_counts).fillna(0).astype("int64")
+        completeness_cols = [
+            "clinic_name",
+            "system_name",
+            "practice_address_1",
+            "practice_city",
+            "practice_state",
+            "practice_zip5",
+            "practice_phone",
+            "org_npi",
+            "org_entity_id",
+            "taxonomy_desc_primary",
+            "website",
+        ]
+        work["row_completeness"] = self._row_completeness(work, completeness_cols)
+        work["name_length"] = work["clinic_name"].str.len().fillna(0).astype("int64")
+
+        clinic_stats = (
+            work.groupby("clinic_id", dropna=False)
+            .agg(
+                clinic_row_count=("clinic_id", "size"),
+                clinic_npi_count=("org_npi", lambda s: int(s[s != ""].nunique())),
+                provider_count=("provider_count", "max"),
+                provider_count_entity=("provider_count_entity", "max"),
+                duplicate_address_group_size=("duplicate_address_group_size", "max"),
+            )
+            .reset_index()
+        )
+        clinic_best = (
+            work.sort_values(
+                by=["row_completeness", "is_hospital", "name_length", "provider_count", "clinic_name"],
+                ascending=[False, False, False, False, True],
+                kind="mergesort",
+            )
+            .drop_duplicates(subset=["clinic_id"], keep="first")
+            .copy()
+        )
+        clinic_rollup = clinic_best[
+            [
+                "clinic_id",
+                "clinic_name",
+                "clinic_display_name",
+                "clinic_name_canonical",
+                "system_id",
+                "system_name",
+                "system_display_name",
+                "system_name_canonical",
+                "org_npi",
+                "org_entity_id",
+                "source_enrollment_id",
+                "practice_address_1",
+                "practice_address_2",
+                "practice_city",
+                "practice_state",
+                "practice_zip5",
+                "practice_phone",
+                "taxonomy_desc_primary",
+                "is_hospital",
+                "website",
+                "website_source",
+                "website_confidence",
+                "clinic_generic_name_flag",
+            ]
+        ].merge(clinic_stats, on="clinic_id", how="left")
+
+        system_stats = (
+            work.groupby("system_id", dropna=False)
+            .agg(
+                system_row_count=("system_id", "size"),
+                system_npi_count=("org_npi", lambda s: int(s[s != ""].nunique())),
+                provider_count_entity=("provider_count_entity", "max"),
+                duplicate_address_group_size=("duplicate_address_group_size", "max"),
+            )
+            .reset_index()
+        )
+        system_best = (
+            work.sort_values(
+                by=["row_completeness", "is_hospital", "name_length", "provider_count_entity", "system_name"],
+                ascending=[False, False, False, False, True],
+                kind="mergesort",
+            )
+            .drop_duplicates(subset=["system_id"], keep="first")
+            .copy()
+        )
+        system_rollup = system_best[
+            [
+                "system_id",
+                "system_name",
+                "system_display_name",
+                "system_name_canonical",
+                "org_entity_id",
+                "org_npi",
+                "practice_address_1",
+                "practice_address_2",
+                "practice_city",
+                "practice_state",
+                "practice_zip5",
+                "practice_phone",
+                "taxonomy_desc_primary",
+                "is_hospital",
+                "website",
+                "website_source",
+                "website_confidence",
+                "system_generic_name_flag",
+                "system_alias_action",
+                "system_alias_reason",
+                "system_alias_blocked_generic",
+            ]
+        ].merge(system_stats, on="system_id", how="left")
+        return clinic_rollup, system_rollup
+
+    @staticmethod
+    def _add_rollup_quality_fields(rollup: pd.DataFrame, count_column: str, generic_column: str) -> pd.DataFrame:
+        out = rollup.copy()
+        out["provider_count_rank"] = pd.to_numeric(out[count_column], errors="coerce").fillna(0).rank(
+            method="dense",
+            ascending=False,
+        ).astype("int64")
+        out["rollup_quality_warning"] = ""
+        generic_mask = out.get(generic_column, False)
+        if not isinstance(generic_mask, pd.Series):
+            generic_mask = pd.Series(False, index=out.index)
+        generic_mask = generic_mask.fillna(False).astype(bool)
+        duplicate_address_mask = pd.to_numeric(out.get("duplicate_address_group_size", 0), errors="coerce").fillna(0).gt(10)
+        missing_name_mask = out[count_column].notna() & out.get("clinic_name", out.get("system_name", "")).astype("string").fillna("").str.strip().eq("")
+        out.loc[generic_mask, "rollup_quality_warning"] = out.loc[generic_mask, "rollup_quality_warning"] + "generic_name;"
+        out.loc[duplicate_address_mask, "rollup_quality_warning"] = out.loc[duplicate_address_mask, "rollup_quality_warning"] + "duplicate_address_cluster;"
+        out.loc[missing_name_mask, "rollup_quality_warning"] = out.loc[missing_name_mask, "rollup_quality_warning"] + "missing_name;"
+        out["rollup_quality_warning"] = out["rollup_quality_warning"].str.rstrip(";")
+        return out
+
+    def _apply_rollups_to_rows(
+        self,
+        df: pd.DataFrame,
+        clinic_rollup: pd.DataFrame,
+        system_rollup: pd.DataFrame,
+    ) -> pd.DataFrame:
+        out = df.copy()
+        clinic_merge = clinic_rollup[
+            [
+                "clinic_id",
+                "clinic_name",
+                "clinic_display_name",
+                "clinic_row_count",
+                "clinic_npi_count",
+                "provider_count",
+                "rollup_quality_warning",
+            ]
+        ].rename(
+            columns={
+                "clinic_name": "_rollup_clinic_name",
+                "clinic_display_name": "_rollup_clinic_display_name",
+                "clinic_row_count": "_rollup_clinic_row_count",
+                "clinic_npi_count": "_rollup_clinic_npi_count",
+                "provider_count": "_rollup_provider_count",
+                "rollup_quality_warning": "_rollup_clinic_quality_warning",
+            }
+        )
+        system_merge = system_rollup[
+            [
+                "system_id",
+                "system_name",
+                "system_display_name",
+                "system_row_count",
+                "system_npi_count",
+                "provider_count_entity",
+                "rollup_quality_warning",
+            ]
+        ].rename(
+            columns={
+                "system_name": "_rollup_system_name",
+                "system_display_name": "_rollup_system_display_name",
+                "system_row_count": "_rollup_system_row_count",
+                "system_npi_count": "_rollup_system_npi_count",
+                "provider_count_entity": "_rollup_provider_count_entity",
+                "rollup_quality_warning": "_rollup_system_quality_warning",
+            }
+        )
+        out = out.merge(clinic_merge, on="clinic_id", how="left")
+        out = out.merge(system_merge, on="system_id", how="left")
+        out["clinic_name"] = coalesce_columns(out, ["_rollup_clinic_name", "clinic_name"])
+        out["clinic_display_name"] = coalesce_columns(out, ["_rollup_clinic_display_name", "clinic_display_name", "clinic_name"])
+        out["system_name"] = coalesce_columns(out, ["_rollup_system_name", "system_name"])
+        out["system_display_name"] = coalesce_columns(out, ["_rollup_system_display_name", "system_display_name", "system_name"])
+        out["clinic_row_count"] = pd.to_numeric(
+            coalesce_columns(out, ["_rollup_clinic_row_count", "clinic_row_count"], default="0"),
+            errors="coerce",
+        ).fillna(0).astype("int64")
+        out["clinic_npi_count"] = pd.to_numeric(
+            coalesce_columns(out, ["_rollup_clinic_npi_count", "clinic_npi_count"], default="0"),
+            errors="coerce",
+        ).fillna(0).astype("int64")
+        out["system_row_count"] = pd.to_numeric(
+            coalesce_columns(out, ["_rollup_system_row_count", "system_row_count"], default="0"),
+            errors="coerce",
+        ).fillna(0).astype("int64")
+        out["system_npi_count"] = pd.to_numeric(
+            coalesce_columns(out, ["_rollup_system_npi_count", "system_npi_count"], default="0"),
+            errors="coerce",
+        ).fillna(0).astype("int64")
+        out["provider_count"] = pd.to_numeric(
+            coalesce_columns(out, ["_rollup_provider_count", "provider_count"], default="0"),
+            errors="coerce",
+        ).fillna(0).astype("int64")
+        out["provider_count_entity"] = pd.to_numeric(
+            coalesce_columns(out, ["_rollup_provider_count_entity", "provider_count_entity"], default="0"),
+            errors="coerce",
+        ).fillna(0).astype("int64")
+        out["clinic_rollup_quality_warning"] = coalesce_columns(
+            out,
+            ["_rollup_clinic_quality_warning", "clinic_rollup_quality_warning"],
+        )
+        out["system_rollup_quality_warning"] = coalesce_columns(
+            out,
+            ["_rollup_system_quality_warning", "system_rollup_quality_warning"],
+        )
+        return out.drop(columns=[column for column in out.columns if column.startswith("_rollup_")], errors="ignore")
+
     def npi_enrichment(self, df: pd.DataFrame, metadata: dict) -> tuple[pd.DataFrame, dict]:
         start = time.time()
         if is_mode_completed("npi_enrichment", metadata):
@@ -283,7 +661,16 @@ class OrgProcessor:
         out["system_id"] = out.apply(
             lambda row: make_hash_id(
                 "system",
+                "entity",
                 row.get("org_entity_id"),
+            ),
+            axis=1,
+        )
+        missing_entity = out["org_entity_id"].astype("string").fillna("").str.strip().eq("")
+        out.loc[missing_entity, "system_id"] = out.loc[missing_entity].apply(
+            lambda row: make_hash_id(
+                "system",
+                "fallback",
                 row.get("system_name"),
                 row.get("org_npi"),
                 row.get("practice_state"),
@@ -291,6 +678,7 @@ class OrgProcessor:
             axis=1,
         )
         out["is_hospital"] = out.apply(is_hospital_from_row, axis=1)
+        out = self._apply_system_alias_overrides(out)
         for column in [
             "hgi_facility_id",
             "hgi_facility_name",
@@ -301,11 +689,23 @@ class OrgProcessor:
             "website_source",
             "website_confidence",
             "provider_count",
+            "provider_count_entity",
+            "clinic_row_count",
+            "system_row_count",
+            "clinic_npi_count",
+            "system_npi_count",
+            "system_alias_action",
+            "system_alias_reason",
+            "clinic_rollup_quality_warning",
+            "system_rollup_quality_warning",
         ]:
             if column not in out.columns:
-                out[column] = 0 if column == "provider_count" else ""
-        if "provider_count" in out.columns:
-            out["provider_count"] = pd.to_numeric(out["provider_count"], errors="coerce").fillna(0).astype("int64")
+                out[column] = 0 if column in {"provider_count", "provider_count_entity", "clinic_row_count", "system_row_count", "clinic_npi_count", "system_npi_count"} else ""
+        if "system_alias_blocked_generic" not in out.columns:
+            out["system_alias_blocked_generic"] = False
+        out["system_alias_blocked_generic"] = out["system_alias_blocked_generic"].fillna(False).astype(bool)
+        for column in ["provider_count", "provider_count_entity", "clinic_row_count", "system_row_count", "clinic_npi_count", "system_npi_count"]:
+            out[column] = pd.to_numeric(out[column], errors="coerce").fillna(0).astype("int64")
 
         metadata = add_mode_completion(
             metadata,
@@ -321,6 +721,8 @@ class OrgProcessor:
                 "taxonomy_desc_primary",
                 "is_hospital",
                 "org_entity_id",
+                "system_alias_action",
+                "system_alias_blocked_generic",
             ],
         )
         return out, metadata
@@ -410,19 +812,50 @@ class OrgProcessor:
             out["provider_count"] = pd.to_numeric(out.get("provider_count", 0), errors="coerce").fillna(0).astype("int64")
             return out, metadata
 
-        ind_df = pd.read_parquet(individuals_path, columns=["provider_id", "mapped_clinic_id"]).copy()
+        ind_df = pd.read_parquet(individuals_path, columns=["provider_id", "mapped_clinic_id", "mapped_system_id"]).copy()
         ind_df["provider_id"] = ind_df["provider_id"].astype("string").fillna("").str.strip()
         ind_df["mapped_clinic_id"] = ind_df["mapped_clinic_id"].astype("string").fillna("").str.strip()
         ind_df = ind_df[(ind_df["provider_id"] != "") & (ind_df["mapped_clinic_id"] != "")]
-        counts = ind_df.groupby("mapped_clinic_id")["provider_id"].nunique()
-        out["provider_count"] = out["clinic_id"].astype("string").map(counts).fillna(0).astype("int64")
+        clinic_counts = ind_df.groupby("mapped_clinic_id")["provider_id"].nunique()
+        out["provider_count"] = out["clinic_id"].astype("string").map(clinic_counts).fillna(0).astype("int64")
+        ind_system_df = ind_df[["provider_id", "mapped_system_id"]].copy()
+        ind_system_df["provider_id"] = ind_system_df["provider_id"].astype("string").fillna("").str.strip()
+        ind_system_df["mapped_system_id"] = ind_system_df["mapped_system_id"].astype("string").fillna("").str.strip()
+        ind_system_df = ind_system_df[(ind_system_df["provider_id"] != "") & (ind_system_df["mapped_system_id"] != "")]
+        system_counts = ind_system_df.groupby("mapped_system_id")["provider_id"].nunique()
+        out["provider_count_entity"] = out["system_id"].astype("string").map(system_counts).fillna(0).astype("int64")
+        clinic_rollup, system_rollup = self._build_rollups(out)
+        clinic_rollup["provider_count"] = clinic_rollup["clinic_id"].astype("string").map(clinic_counts).fillna(0).astype("int64")
+        system_rollup["provider_count_entity"] = system_rollup["system_id"].astype("string").map(system_counts).fillna(0).astype("int64")
+        clinic_rollup = self._add_rollup_quality_fields(clinic_rollup, "provider_count", "clinic_generic_name_flag")
+        system_rollup = self._add_rollup_quality_fields(system_rollup, "provider_count_entity", "system_generic_name_flag")
+        out = self._apply_rollups_to_rows(out, clinic_rollup, system_rollup)
+        clinic_key = out["clinic_id"].astype("string").fillna("").str.strip()
+        system_key = out["system_id"].astype("string").fillna("").str.strip()
+        clinic_rollup_indexed = clinic_rollup.copy()
+        clinic_rollup_indexed.index = clinic_rollup_indexed["clinic_id"].astype("string").fillna("").str.strip()
+        system_rollup_indexed = system_rollup.copy()
+        system_rollup_indexed.index = system_rollup_indexed["system_id"].astype("string").fillna("").str.strip()
+        out["clinic_name"] = clinic_key.map(clinic_rollup_indexed["clinic_name"]).fillna(out["clinic_name"])
+        out["clinic_display_name"] = clinic_key.map(clinic_rollup_indexed["clinic_display_name"]).fillna(out["clinic_display_name"])
+        out["system_name"] = system_key.map(system_rollup_indexed["system_name"]).fillna(out["system_name"])
+        out["system_display_name"] = system_key.map(system_rollup_indexed["system_display_name"]).fillna(out["system_display_name"])
+        out["provider_count"] = clinic_key.map(clinic_rollup_indexed["provider_count"]).fillna(0).astype("int64")
+        out["provider_count_entity"] = system_key.map(system_rollup_indexed["provider_count_entity"]).fillna(0).astype("int64")
+        out["clinic_row_count"] = clinic_key.map(clinic_rollup_indexed["clinic_row_count"]).fillna(0).astype("int64")
+        out["clinic_npi_count"] = clinic_key.map(clinic_rollup_indexed["clinic_npi_count"]).fillna(0).astype("int64")
+        out["system_row_count"] = system_key.map(system_rollup_indexed["system_row_count"]).fillna(0).astype("int64")
+        out["system_npi_count"] = system_key.map(system_rollup_indexed["system_npi_count"]).fillna(0).astype("int64")
+        self.clinic_rollup_path(metadata.get("date") or datetime.now().strftime("%Y%m%d")).parent.mkdir(parents=True, exist_ok=True)
+        clinic_rollup.to_parquet(self.clinic_rollup_path(metadata.get("date") or datetime.now().strftime("%Y%m%d")), index=False)
+        system_rollup.to_parquet(self.system_rollup_path(metadata.get("date") or datetime.now().strftime("%Y%m%d")), index=False)
 
         metadata = add_mode_completion(
             metadata,
             "provider_count",
             time.time() - start,
             len(out),
-            ["provider_count"],
+            ["provider_count", "provider_count_entity", "clinic_row_count", "system_row_count", "clinic_npi_count", "system_npi_count"],
         )
         return out, metadata
 
@@ -495,34 +928,45 @@ class OrgProcessor:
         out.loc[hgi_mask & out["website"].ne(""), "website_source"] = "hgi"
         out.loc[hgi_mask & out["website"].ne(""), "website_confidence"] = out.loc[hgi_mask & out["website"].ne(""), "hgi_match_confidence"]
 
-        overpass = load_overpass(self.data_dir)
         need_lookup = out["website"].eq("") & out["is_hospital"].fillna(False).astype(bool)
-        if overpass:
-            for idx, row in out.loc[need_lookup].iterrows():
-                url, score = self._overpass_match(overpass, row)
-                if url and score >= 0.55:
-                    out.at[idx, "website"] = url
-                    out.at[idx, "website_source"] = "overpass"
-                    out.at[idx, "website_confidence"] = f"{score:.3f}"
+        if offline_only:
+            LOGGER.info("Skipping Overpass lookup in offline-only mode; using HGI-derived websites and local Nominatim cache only.")
+        else:
+            overpass = load_overpass(self.data_dir)
+            if overpass:
+                for idx, row in out.loc[need_lookup].iterrows():
+                    url, score = self._overpass_match(overpass, row)
+                    if url and score >= 0.55:
+                        out.at[idx, "website"] = url
+                        out.at[idx, "website_source"] = "overpass"
+                        out.at[idx, "website_confidence"] = f"{score:.3f}"
 
         need_lookup = out["website"].eq("") & out["is_hospital"].fillna(False).astype(bool)
         if need_lookup.any():
             date_str = metadata.get("date") or datetime.now().strftime("%Y%m%d")
-            client = NominatimClient(cache_path=self.hash_dir / f"osm_website_cache_pecos_{date_str}.json", offline_only=offline_only)
-            for idx, row in out.loc[need_lookup].iterrows():
-                result = client.lookup_website(
-                    name=row.get("system_name") or row.get("clinic_name") or "",
-                    address=combine_address(row.get("practice_address_1"), row.get("practice_address_2")),
-                    city=row.get("practice_city") or "",
-                    state=row.get("practice_state") or "",
-                    postal=row.get("practice_zip5") or "",
-                    min_importance=0.25,
+            cache_path = self.hash_dir / f"osm_website_cache_pecos_{date_str}.json"
+            if offline_only and not cache_path.exists():
+                LOGGER.info(
+                    "Skipping offline Nominatim fallback because cache does not exist: %s",
+                    cache_path,
                 )
-                if not result or not result.get("url"):
-                    continue
-                out.at[idx, "website"] = root_url(result.get("url")) or ""
-                out.at[idx, "website_source"] = "nominatim"
-                out.at[idx, "website_confidence"] = str(result.get("confidence", 0.6))
+            else:
+                client = NominatimClient(cache_path=cache_path, offline_only=offline_only)
+                for idx, row in out.loc[need_lookup].iterrows():
+                    result = client.lookup_website(
+                        name=row.get("system_name") or row.get("clinic_name") or "",
+                        address=combine_address(row.get("practice_address_1"), row.get("practice_address_2")),
+                        city=row.get("practice_city") or "",
+                        state=row.get("practice_state") or "",
+                        postal=row.get("practice_zip5") or "",
+                        min_importance=0.25,
+                    )
+                    if not result or not result.get("url"):
+                        continue
+                    out.at[idx, "website"] = root_url(result.get("url")) or ""
+                    out.at[idx, "website_source"] = "nominatim"
+                    out.at[idx, "website_confidence"] = str(result.get("confidence", 0.6))
+                client.flush()
 
         metadata = add_mode_completion(
             metadata,
@@ -540,6 +984,7 @@ def main():
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--input-parquet", default=None)
     parser.add_argument("--offline-only", action="store_true")
+    parser.add_argument("--force", action="store_true", help="Re-run the requested mode even if metadata marks it completed.")
     args = parser.parse_args()
 
     mode = args.mode or _mode_prompt()
@@ -555,7 +1000,24 @@ def main():
     data_date = extract_date_from_filename(base_path)
     metadata_path = processor.metadata_path(data_date)
     metadata = load_metadata(metadata_path, data_date)
-    df = processor.load_working_frame(base_path, data_date)
+    if args.force:
+        modes_to_clear = valid_modes - {"all"} if mode == "all" else {mode}
+        metadata["processing_modes_completed"] = [
+            item for item in metadata.get("processing_modes_completed", []) if item.get("mode") not in modes_to_clear
+        ]
+        LOGGER.info("Force re-run requested. Cleared completion metadata for modes: %s", ", ".join(sorted(modes_to_clear)))
+    alias_signature = processor.system_alias_override_signature()
+    previous_alias_signature = str(metadata.get("system_alias_override_signature") or "")
+    if alias_signature != previous_alias_signature:
+        LOGGER.info("Approved system alias overrides changed. Rebuilding org processing from base PECOS parquet.")
+        dependent_modes = {"npi_enrichment", "hgi_enrichment", "provider_count", "website_mapping"}
+        metadata["processing_modes_completed"] = [
+            item for item in metadata.get("processing_modes_completed", []) if item.get("mode") not in dependent_modes
+        ]
+        LOGGER.info("Loading base org parquet: %s", base_path)
+        df = pd.read_parquet(base_path)
+    else:
+        df = processor.load_working_frame(base_path, data_date)
 
     if mode in {"hgi_enrichment", "provider_count", "website_mapping"} and "clinic_id" not in df.columns:
         df, metadata = processor.npi_enrichment(df, metadata)
@@ -569,6 +1031,7 @@ def main():
         df, metadata = processor.website_mapping(df, metadata, offline_only=args.offline_only)
 
     metadata["total_records"] = int(len(df))
+    metadata["system_alias_override_signature"] = alias_signature
     output_path = processor.output_path(data_date)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, index=False)

@@ -17,6 +17,81 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 HOSPITAL_TAXONOMY_CODES = {"282N00000X", "283Q00000X", "284300000X", "283X00000X"}
+SPECIALTY_ROLLUP_COLUMNS = [
+    "source_value",
+    "source_type",
+    "normalized_specialty",
+    "specialty_group",
+    "provider_type_group",
+    "is_provider_type",
+    "notes",
+]
+ENTITY_NAME_STOPWORDS = {
+    "and",
+    "at",
+    "care",
+    "center",
+    "centers",
+    "centre",
+    "clinic",
+    "clinics",
+    "company",
+    "corp",
+    "corporation",
+    "for",
+    "group",
+    "health",
+    "healthcare",
+    "hospital",
+    "hospitals",
+    "inc",
+    "llc",
+    "ltd",
+    "medical",
+    "medicine",
+    "network",
+    "of",
+    "pa",
+    "pc",
+    "physician",
+    "physicians",
+    "pllc",
+    "service",
+    "services",
+    "system",
+    "systems",
+    "the",
+}
+
+ADDRESS_UNIT_PATTERN = re.compile(
+    r"\b(?:apt|apartment|bldg|building|dept|department|fl|floor|lot|rm|room|ste|suite|unit)\b\.?\s*[a-z0-9-]*",
+    flags=re.I,
+)
+ADDRESS_SUFFIX_REPLACEMENTS = {
+    "avenue": "ave",
+    "boulevard": "blvd",
+    "circle": "cir",
+    "court": "ct",
+    "drive": "dr",
+    "highway": "hwy",
+    "lane": "ln",
+    "parkway": "pkwy",
+    "place": "pl",
+    "road": "rd",
+    "square": "sq",
+    "street": "st",
+    "terrace": "ter",
+}
+ADDRESS_DIRECTION_REPLACEMENTS = {
+    "north": "n",
+    "south": "s",
+    "east": "e",
+    "west": "w",
+    "northeast": "ne",
+    "northwest": "nw",
+    "southeast": "se",
+    "southwest": "sw",
+}
 
 
 def ensure_dirs(data_dir: Path):
@@ -144,6 +219,32 @@ def normalize_text(value) -> str:
     return text
 
 
+def normalize_address_line1(value) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+    text = ADDRESS_UNIT_PATTERN.sub(" ", text)
+    tokens = []
+    for token in text.split():
+        token = ADDRESS_SUFFIX_REPLACEMENTS.get(token, token)
+        token = ADDRESS_DIRECTION_REPLACEMENTS.get(token, token)
+        if token:
+            tokens.append(token)
+    return " ".join(tokens).strip()
+
+
+def canonical_entity_name(value, extra_stopwords: Iterable[str] | None = None) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+    blocked = set(ENTITY_NAME_STOPWORDS)
+    if extra_stopwords is not None:
+        blocked |= {normalize_text(item) for item in extra_stopwords if normalize_text(item)}
+    tokens = [token for token in text.split() if token and token not in blocked]
+    canonical = " ".join(tokens).strip()
+    return canonical or text
+
+
 def token_set(value) -> set[str]:
     return {token for token in normalize_text(value).split(" ") if token}
 
@@ -261,6 +362,24 @@ def load_taxonomy_lookup(data_dir: Path) -> dict[str, str]:
         return json.loads(path.read_text())
     except Exception:
         return {}
+
+
+def load_specialty_rollup(data_dir: Path) -> pd.DataFrame:
+    path = data_dir / "config" / "specialty_rollup.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=[*SPECIALTY_ROLLUP_COLUMNS, "source_key"])
+    try:
+        rollup = pd.read_csv(path, dtype=str).fillna("")
+    except Exception:
+        return pd.DataFrame(columns=[*SPECIALTY_ROLLUP_COLUMNS, "source_key"])
+    for column in SPECIALTY_ROLLUP_COLUMNS:
+        if column not in rollup.columns:
+            rollup[column] = ""
+        rollup[column] = rollup[column].astype("string").fillna("").str.strip()
+    rollup["source_type"] = rollup["source_type"].str.lower()
+    rollup["source_key"] = rollup["source_value"].map(normalize_text)
+    rollup = rollup[rollup["source_key"].ne("")].copy()
+    return rollup.drop_duplicates(subset=["source_type", "source_key"], keep="first")
 
 
 def resolve_primary_taxonomy_description(df: pd.DataFrame, taxonomy_lookup: dict[str, str]) -> pd.Series:
