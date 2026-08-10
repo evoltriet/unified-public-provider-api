@@ -1,162 +1,178 @@
-# NPI Registry API – Reference
+# Unified CMS Provider API Reference
 
-## 🚀 Start Server
+The Flask API serves the CMS provider baseline built from PPEF, PECOS, and NPI Registry data. It loads the `current_active_primary` provider view by default and uses the canonical PECOS clinic and system rollups.
+
+## Start Server
+
 ```bash
 # Development
-python api.py
+python src/api.py
 
-# Production (example)
-gunicorn -w 4 -b 0.0.0.0:5000 api:app
+# Production
+gunicorn -c src/gunicorn_config.py src.api:app
 ```
 
-## 📦 Data Loading
-- Providers load from `data/processed_data/npi_individuals_processed_*.parquet` (fallback `data/parquet/npi_individuals_*.parquet`).
-- Hospitals load from `data/processed_data/npi_organizations_processed_*.parquet` (fallback `data/parquet/npi_organizations_*.parquet`).
-- `MAX_RESULTS_DEFAULT` (default **50**) and `MAX_RESULTS_LIMIT` (default **500**) control paging.
+## Data Loading
 
-## 📡 Endpoints
+The default CMS source loads:
 
-### Health Check
-```
+- `data/processed_data/ppef_individuals_comparison_baseline_*.parquet`
+- `data/processed_data/pecos_clinic_rollup_*.parquet`
+- `data/processed_data/pecos_system_rollup_*.parquet`
+
+Set `API_DATA_SOURCE=legacy_npi` to use the older NPPES API artifacts directly. If CMS artifacts are absent, `ALLOW_LEGACY_NPI_FALLBACK=true` permits automatic fallback.
+
+## Provider Endpoints
+
+### Health
+
+```text
 GET /api/health
 ```
 
-### Taxonomy Keywords → Codes
-```
-GET /api/taxonomy/codes
+Reports source, baseline view, snapshot dates, artifact paths, and provider/clinic/system counts.
+
+### Provider by NPI
+
+```text
+GET /api/providers/{10-digit-npi}
 ```
 
-### Provider – Get by NPI
-```
-GET /api/providers/{npi}
+### Search by Name
+
+```text
+GET /api/providers/search/name?name=Jane%20Doe&city=Minneapolis&state=MN&hospital=North%20Health&location_source=any&limit=25
 ```
 
-### Provider – Search by Specialty (keyword or taxonomy code)
-```
-GET /api/providers/search/specialty?specialty={value}&state={STATE}&limit={N}
+`name` is required. Optional filters are `city`, `state`, `postal_code`, `hospital`, `location_source`, and `limit`.
+
+### Search by Specialty
+
+```text
+GET /api/providers/search/specialty?specialty=Cardiology&state=MN&limit=25
 ```
 
-### Provider – Search by Location (city & state, optional specialty)
-```
-GET /api/providers/search/location?city={City}&state={STATE}&specialty={value}&limit={N}
+Specialty search considers taxonomy codes, taxonomy descriptions, normalized specialty, specialty group, and provider type.
+
+### Search by Location
+
+```text
+GET /api/providers/search/location?city=Minneapolis&state=MN&location_source=any&limit=25
 ```
 
-### Provider – Search by State
-```
-GET /api/providers/search/state/{STATE}?limit={N}
+`city` and `state` are required. `location_source` accepts:
+
+- `any`: provider practice or mapped affiliation location, the default
+- `provider`: NPI Registry provider-practice location only
+- `affiliation`: mapped PECOS clinic location only
+
+### Search by State or ZIP
+
+```text
+GET /api/providers/search/state/MN?limit=25
+GET /api/providers/search/postal_code/55401?limit=25
 ```
 
-### Provider – Search by Postal Code
-```
-GET /api/providers/search/postal_code/{ZIP5}?limit={N}
+### Search by Hospital, System, or Clinic Affiliation
+
+```text
+GET /api/providers/search/hospital?hospital=North%20Health&state=MN&limit=25
 ```
 
-### Provider – **Search by Provider Name** (NEW)
-```
-GET /api/providers/search/name?name={Jane%20Doe}&city={City}&state={STATE}&postal_code={ZIP5}&hospital={Org}&limit={N}
-```
-- **Required**: `name`
-- **Optional**: `city`, `state`, `postal_code` (prefix match), `hospital` (organization name), `limit`
+The hospital query is matched against both mapped system and clinic names.
 
-### Provider – Search by Hospital Name
-```
-GET /api/providers/search/hospital?hospital={Org}&state={STATE}&limit={N}
-```
+## Organization Endpoints
 
-### Hospital – Search by Location (city+state OR postal_code OR address+city+state)
-```
-GET /api/hospitals/search/location?city={City}&state={STATE}&postal_code={ZIP5}&address={Line1}&limit={N}
+```text
+GET /api/clinics/search/name?clinic=North%20Clinic&state=MN&limit=25
+GET /api/clinics/search/location?postal_code=55401&limit=25
+
+GET /api/systems/search/name?system=North%20Health&state=MN&limit=25
+GET /api/systems/search/location?city=Minneapolis&state=MN&limit=25
+
+GET /api/hospitals/search/name?hospital=North%20Health&state=MN&limit=25
+GET /api/hospitals/search/location?postal_code=55401&limit=25
 ```
 
-### Hospital – **Search by Hospital Name** (NEW)
-```
-GET /api/hospitals/search/name?hospital={Org}&city={City}&state={STATE}&postal_code={ZIP5}&limit={N}
-```
-- **Required**: `hospital`
-- **Optional**: `city`, `state`, `postal_code` (prefix match), `limit`
+Hospital routes are compatibility routes over PECOS systems marked as hospitals. System routes include all canonical system entities.
 
-## 🔧 Common Parameters
-- `state`: two-letter uppercase (normalized internally)
-- `postal_code`: first **5** digits are used for matching
-- `limit`: default **50**, max **500** (capped server-side)
+Organization location search accepts `city+state`, `postal_code`, or `address`.
 
-## 🧾 Response Shapes (high level)
+## Provider Response
 
-### Provider Object
+Legacy keys remain available, including `organization_name`, `taxonomy_codes`, `primary_taxonomy`, `primary_specialty`, and `address`. CMS fields are additive:
+
 ```json
 {
   "npi": "1234567890",
-  "entity_type": "Individual",
-  "provider_name": "Jane Doe, MD",
-  "organization_name": "Mayo Clinic",
-  "taxonomy_codes": ["207Y00000X", "207YX0901X"],
-  "primary_taxonomy": "207Y00000X",
-  "specialty_descriptions": ["Otolaryngology"],
-  "primary_specialty": "Otolaryngology",
+  "provider_id": "provider_1234567890",
+  "provider_name": "Jane Q Doe",
+  "organization_name": "North Clinic",
+  "primary_specialty": "Cardiology",
   "address": {
-    "address_1": "123 Main St",
-    "address_2": "Suite 100",
-    "city": "Rochester",
+    "address_1": "10 Old Road",
+    "city": "St Paul",
     "state": "MN",
-    "postal_code": "55901",
-    "phone": "5075550000"
+    "postal_code": "55101",
+    "phone": "6515550100"
   },
-  "geocode": {"latitude": 44.0, "longitude": -93.0},
-  "geohash": "9zvx..."
+  "specialty": {
+    "taxonomy_code": "207RC0000X",
+    "taxonomy_description": "Cardiovascular Disease",
+    "normalized": "Cardiology",
+    "group": "Cardiology",
+    "provider_type": "Physician"
+  },
+  "affiliation": {
+    "clinic": {"id": "clinic_1", "name": "North Clinic"},
+    "system": {"id": "system_1", "name": "North Health"},
+    "practice_location": {
+      "address_1": "100 Main Street",
+      "city": "Minneapolis",
+      "state": "MN",
+      "postal_code": "55401",
+      "phone": "6125550100"
+    },
+    "relationship": {"source": "PPEF_REASSIGNMENT", "active": true}
+  },
+  "currentness": {
+    "active": true,
+    "tier": "current_active_primary",
+    "as_of_date": "2026-05-05"
+  },
+  "mapping": {
+    "confidence_tier": "high",
+    "method": "reassignment",
+    "score": 12.5,
+    "ambiguous": false
+  },
+  "provenance": {
+    "ppef_snapshot_date": "2026-05-05",
+    "pecos_snapshot_date": "2026-05-05",
+    "npi_registry_snapshot_date": "2026-05-05"
+  }
 }
 ```
 
-### Hospital Record (simplified)
-```json
-{
-  "organization_name": "Mayo Clinic Hospital",
-  "address": {
-    "address_1": "1216 Second St SW",
-    "address_2": "",
-    "city": "Rochester",
-    "state": "MN",
-    "postal_code": "55902"
-  },
-  "is_hospital": true,
-  "system_homepage_url": "https://www.mayoclinic.org/",
-  "location_page_url": "https://www.mayoclinic.org/patient-visitor-guide/minnesota",
-  "org_entity_id": "org_123",
-  "provider_count": 2500,
-  "provider_count_entity": 1800
-}
-```
+## Environment Variables
 
-## 🐛 Error Codes
-- **200** Success (may include empty `results` with explanatory `message`)
-- **400** Bad Request (missing required parameters)
-- **404** Not Found (e.g., provider by NPI)
-- **500** Server Error
-- **503** Service Unavailable (dataset not loaded)
+- `DATA_DIR`, default `data`
+- `API_DATA_SOURCE`, `cms` or `legacy_npi`, default `cms`
+- `CMS_BASELINE_VIEW`, default `current_active_primary`
+- `CMS_PROVIDER_PATH`, optional explicit baseline parquet
+- `CMS_CLINIC_PATH`, optional explicit clinic-rollup parquet
+- `CMS_SYSTEM_PATH`, optional explicit system-rollup parquet
+- `ALLOW_LEGACY_NPI_FALLBACK`, default `true`
+- `API_HOST`, default `0.0.0.0`
+- `API_PORT`, default `5000`
+- `MAX_RESULTS_DEFAULT`, default `50`
+- `MAX_RESULTS_LIMIT`, default `500`
+- `GUNICORN_WORKERS`, default `2`
 
-## ⚙️ Environment Variables
-- `DATA_DIR` (default `data`)
-- `API_HOST` (default `0.0.0.0`)
-- `API_PORT` (default `5000`)
-- `FLASK_ENV` (`development` enables debug)
-- `MAX_RESULTS_DEFAULT` (default `50`)
-- `MAX_RESULTS_LIMIT` (default `500`)
+## Status Codes
 
-## 🔎 Examples
-```bash
-# Provider by name
-curl "http://localhost:5000/api/providers/search/name?name=Jane%20Doe&city=Minneapolis&state=MN&limit=25"
-
-# Hospital by name
-curl "http://localhost:5000/api/hospitals/search/name?hospital=Mayo%20Clinic&state=MN&limit=25"
-
-# Providers by hospital name
-curl "http://localhost:5000/api/providers/search/hospital?hospital=Mayo%20Clinic&state=MN&limit=25"
-
-# Hospitals by postal code (location search)
-curl "http://localhost:5000/api/hospitals/search/location?postal_code=55401&limit=25"
-```
-
----
-**Notes**
-- City and state comparisons are case-insensitive for city and normalized uppercase for state.
-- Postal code matches on the prefix of the practice ZIP (first 5 digits).
+- `200`: success, including valid searches with no results
+- `400`: invalid or missing query parameter
+- `404`: NPI or route not found
+- `500`: unexpected server error
+- `503`: required dataset not loaded

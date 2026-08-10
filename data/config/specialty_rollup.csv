@@ -1,0 +1,87 @@
+source_value,source_type,normalized_specialty,specialty_group,provider_type_group,is_provider_type,notes
+Family Medicine,taxonomy_desc,Family Medicine,Primary Care,,false,Direct specialty
+Family Practice,taxonomy_desc,Family Medicine,Primary Care,,false,Common synonym
+Internal Medicine,taxonomy_desc,Internal Medicine,Primary Care,,false,Direct specialty
+Internal Medicine Specialist,taxonomy_desc,Internal Medicine,Primary Care,,false,Common synonym
+Pediatrics,taxonomy_desc,Pediatrics,Primary Care,,false,Direct specialty
+Obstetrics & Gynecology,taxonomy_desc,Obstetrics and Gynecology,Women's Health,,false,Direct specialty
+Obstetrics and Gynecology,taxonomy_desc,Obstetrics and Gynecology,Women's Health,,false,Direct specialty
+Ophthalmology,taxonomy_desc,Ophthalmology,Eye Care,,false,Common specialty
+Radiology,taxonomy_desc,Radiology,Radiology,,false,Common specialty
+Diagnostic Radiology,taxonomy_desc,Diagnostic Radiology,Radiology,,false,Common specialty
+Physical Therapy,taxonomy_desc,Physical Therapy,Rehabilitation,Physical Therapist,false,Common specialty
+Chiropractic Medicine,taxonomy_desc,Chiropractic Medicine,Chiropractic,Chiropractor,false,Common specialty
+Nurse Anesthetist,taxonomy_desc,Nurse Anesthetist,Anesthesiology,Nurse Anesthetist,true,Common provider type
+Surgery,taxonomy_desc,General Surgery,Surgery,,false,Common broad specialty
+Cardiovascular Disease,taxonomy_desc,Cardiology,Cardiology,,false,Common NPI taxonomy label for cardiology
+Dermatology,taxonomy_desc,Dermatology,Dermatology,,false,Direct specialty
+Orthopaedic Surgery,taxonomy_desc,Orthopedic Surgery,Orthopedics,,false,NPI taxonomy spelling normalized to common scheduling label
+Neurological Surgery,taxonomy_desc,Neurosurgery,Neurosurgery,,false,NPI taxonomy label normalized to common scheduling label
+207T00000X,taxonomy_code,Neurosurgery,Neurosurgery,,false,NPI taxonomy code for neurological surgery
+Optometry,taxonomy_desc,Optometry,Eye Care,,false,Direct specialty
+152W00000X,taxonomy_code,Optometry,Eye Care,,false,NPI taxonomy code for optometry
+Optometrist,taxonomy_desc,Optometry,Eye Care,,false,NUCC taxonomy label normalized to optometry
+Anesthesiology,taxonomy_desc,Anesthesiology,Anesthesiology,,false,Direct specialty
+Pain Medicine,taxonomy_desc,Pain Medicine,Pain Medicine,,false,Direct specialty
+Pain Medicine (Physical Medicine & Rehabilitation),taxonomy_desc,Interventional Pain Management,Pain Medicine,,false,Common scheduling rollup
+Interventional Pain Medicine,taxonomy_desc,Interventional Pain Management,Pain Medicine,,false,NUCC taxonomy label normalized to common scheduling label
+208VP0014X,taxonomy_code,Interventional Pain Management,Pain Medicine,,false,NPI taxonomy code for interventional pain medicine
+Hospitalist,taxonomy_desc,Hospital Medicine,Hospital Medicine,,false,Hospital medicine rollup
+208M00000X,taxonomy_code,Hospital Medicine,Hospital Medicine,,false,NPI taxonomy code for hospitalist
+Emergency Medicine,taxonomy_desc,Emergency Medicine,Emergency Medicine,,false,Direct specialty
+Urgent Care,taxonomy_desc,Urgent Care,Walk-in Care,,false,Walk-in care rollup
+Chiropractor,taxonomy_desc,Chiropractic,Chiropractic,Chiropractor,true,Provider type and specialty category
+111N00000X,taxonomy_code,Chiropractic,Chiropractic,Chiropractor,true,NPI taxonomy code for chiropractor
+Dentist,taxonomy_desc,Dentistry,Dental,Dentist,true,Provider type and dental specialty category
+122300000X,taxonomy_code,Dentistry,Dental,Dentist,true,NPI taxonomy code for dentist
+General Practice (Dentist),taxonomy_desc,General Dentistry,Dental,Dentist,true,NUCC dental general practice taxonomy label
+1223G0001X,taxonomy_code,General Dentistry,Dental,Dentist,true,NPI taxonomy code for dental general practice
+Endodontics,taxonomy_desc,Endodontics,Dental,Dentist,true,NUCC dental specialty taxonomy label
+1223E0200X,taxonomy_code,Endodontics,Dental,Dentist,true,NPI taxonomy code for endodontics
+Pediatric Dentistry,taxonomy_desc,Pediatric Dentistry,Dental,Dentist,true,NUCC dental specialty taxonomy label
+1223P0221X,taxonomy_code,Pediatric Dentistry,Dental,Dentist,true,NPI taxonomy code for pediatric dentistry
+Periodontics,taxonomy_desc,Periodontics,Dental,Dentist,true,NUCC dental specialty taxonomy label
+1223P0300X,taxonomy_code,Periodontics,Dental,Dentist,true,NPI taxonomy code for periodontics
+Oral and Maxillofacial Surgery (Dentist),taxonomy_desc,Oral and Maxillofacial Surgery,Dental,Dentist,true,NUCC dental specialty taxonomy label
+1223S0112X,taxonomy_code,Oral and Maxillofacial Surgery,Dental,Dentist,true,NPI taxonomy code for dental oral and maxillofacial surgery
+Podiatrist,taxonomy_desc,Podiatry,Podiatry,Podiatrist,true,Provider type and podiatry specialty category
+213E00000X,taxonomy_code,Podiatry,Podiatry,Podiatrist,true,NPI taxonomy code for podiatrist
+Foot & Ankle Surgery (Podiatrist),taxonomy_desc,Foot and Ankle Podiatry,Podiatry,Podiatrist,true,NUCC podiatry specialty taxonomy label
+213ES0103X,taxonomy_code,Foot and Ankle Podiatry,Podiatry,Podiatrist,true,NPI taxonomy code for podiatry foot and ankle surgery
+Foot Surgery (Podiatrist),taxonomy_desc,Foot Surgery,Podiatry,Podiatrist,true,NUCC podiatry specialty taxonomy label
+213ES0131X,taxonomy_code,Foot Surgery,Podiatry,Podiatrist,true,NPI taxonomy code for podiatry foot surgery
+Occupational Therapist,taxonomy_desc,Occupational Therapy,Rehabilitation,Occupational Therapist,true,Provider type and therapy specialty category
+225X00000X,taxonomy_code,Occupational Therapy,Rehabilitation,Occupational Therapist,true,NPI taxonomy code for occupational therapist
+Hand Occupational Therapist,taxonomy_desc,Hand Occupational Therapy,Rehabilitation,Occupational Therapist,true,NUCC occupational therapy specialty taxonomy label
+225XH1200X,taxonomy_code,Hand Occupational Therapy,Rehabilitation,Occupational Therapist,true,NPI taxonomy code for hand occupational therapist
+Speech-Language Pathologist,taxonomy_desc,Speech-Language Pathology,Speech/Hearing,Speech-Language Pathologist,true,Provider type and speech specialty category
+235Z00000X,taxonomy_code,Speech-Language Pathology,Speech/Hearing,Speech-Language Pathologist,true,NPI taxonomy code for speech-language pathologist
+Audiologist,taxonomy_desc,Audiology,Speech/Hearing,Audiologist,true,Provider type and audiology specialty category
+231H00000X,taxonomy_code,Audiology,Speech/Hearing,Audiologist,true,NPI taxonomy code for audiologist
+Audiologist-Hearing Aid Fitter,taxonomy_desc,Audiology,Speech/Hearing,Audiologist,true,NUCC taxonomy label normalized to audiology
+237600000X,taxonomy_code,Audiology,Speech/Hearing,Audiologist,true,NPI taxonomy code for audiologist-hearing aid fitter
+"Dietitian, Registered",taxonomy_desc,Dietitian,Nutrition,Dietitian,true,Provider type and nutrition specialty category
+133V00000X,taxonomy_code,Dietitian,Nutrition,Dietitian,true,NPI taxonomy code for registered dietitian
+Marriage & Family Therapist,taxonomy_desc,Marriage and Family Therapy,Behavioral Health,Therapist,true,Provider type and behavioral health category
+106H00000X,taxonomy_code,Marriage and Family Therapy,Behavioral Health,Therapist,true,NPI taxonomy code for marriage and family therapist
+Clinical Neuropsychologist,taxonomy_desc,Clinical Neuropsychology,Behavioral Health,Psychologist,true,NUCC taxonomy label normalized to behavioral health category
+103G00000X,taxonomy_code,Clinical Neuropsychology,Behavioral Health,Psychologist,true,NPI taxonomy code for clinical neuropsychologist
+Colon & Rectal Surgery,taxonomy_desc,Colon and Rectal Surgery,Surgical Specialty,,false,Direct specialty
+208C00000X,taxonomy_code,Colon and Rectal Surgery,Surgical Specialty,,false,NPI taxonomy code for colon and rectal surgery
+Thoracic Surgery (Cardiothoracic Vascular Surgery),taxonomy_desc,Thoracic Surgery,Surgical Specialty,,false,Direct specialty
+208G00000X,taxonomy_code,Thoracic Surgery,Surgical Specialty,,false,NPI taxonomy code for thoracic surgery
+Midwife,taxonomy_desc,Midwifery,Women's Health,Midwife,true,Provider type and women's health category
+176B00000X,taxonomy_code,Midwifery,Women's Health,Midwife,true,NPI taxonomy code for midwife
+Specialist,taxonomy_desc,Specialist,Other Specialty,Specialist,true,Generic NUCC provider type
+174400000X,taxonomy_code,Specialist,Other Specialty,Specialist,true,NPI taxonomy code for specialist
+Family Nurse Practitioner,taxonomy_desc,Family Medicine,Primary Care,Nurse Practitioner,true,Provider type often schedules into family medicine
+Adult Health Nurse Practitioner,taxonomy_desc,Internal Medicine,Primary Care,Nurse Practitioner,true,Provider type often schedules into internal medicine
+Primary Care Nurse Practitioner,taxonomy_desc,Primary Care,Primary Care,Nurse Practitioner,true,Provider type rollup
+Pediatric Nurse Practitioner,taxonomy_desc,Pediatrics,Primary Care,Nurse Practitioner,true,Provider type often schedules into pediatrics
+Nurse Practitioner,taxonomy_desc,Primary Care,Primary Care,Nurse Practitioner,true,Generic provider type rollup
+Registered Nurse,taxonomy_desc,Nursing,Nursing,Registered Nurse,true,Provider type
+163W00000X,taxonomy_code,Registered Nurse,Nursing,Registered Nurse,true,NPI taxonomy code for registered nurse
+Physician Assistant,taxonomy_desc,Primary Care,Primary Care,Physician Assistant,true,Generic provider type rollup
+Medical (Physician Assistant),taxonomy_desc,Primary Care,Primary Care,Physician Assistant,true,Provider type often schedules into primary care
+Surgical (Physician Assistant),taxonomy_desc,Surgical Specialty,Surgical Specialty,Physician Assistant,true,Provider type
+390200000X,taxonomy_code,Student in an Organized Health Care Education/Training Program,Training/Student,Student,true,NPI taxonomy code for trainees
