@@ -1,139 +1,71 @@
 # Unified Public Provider API
 
-A Flask API and public-data pipeline for building searchable provider and hospital datasets from CMS NPI/NPPES files, with parallel work toward stronger clinic and health-system mapping.
+A Flask API and reproducible data pipeline for building a searchable provider, clinic, and health-system dataset from public CMS sources.
 
 ## Overview
 
-This repository has two connected goals:
+Raw provider data is distributed across multiple CMS files with different identifiers, update schedules, and organization semantics. This repository turns those files into a unified CMS baseline by combining:
 
-- turn large, messy public provider files into parquet datasets that are practical to query and enrich
-- expose those datasets through a lightweight API for provider and hospital search
+- Medicare Fee-For-Service Public Provider Enrollment data for provider enrollment and reassignment relationships
+- PECOS-style organization and practice-location records derived from the public enrollment assets
+- NPI Registry data for provider identity, taxonomy, address, and phone enrichment
 
-Today, the API serves the processed NPI/NPPES path. In parallel, the repo also contains a newer PPEF/PECOS/HGI pipeline intended to improve organization, clinic, and system mapping before any future API cutover.
+The resulting baseline supports current-active provider analysis, clinic and system affiliation mapping, aggregate quality review, and API search.
 
-## Problem
+## Architecture
 
-Public provider data is useful, but it is not easy to work with directly.
+```text
+CMS enrollment assets       NPI Registry
+        |                         |
+        v                         v
+ PPEF individuals          NPI parquet splits
+ PECOS organizations              |
+        |                         |
+        +-----------+-------------+
+                    |
+                    v
+       Enriched organizations and providers
+                    |
+        +-----------+------------+
+        |                        |
+        v                        v
+ CMS comparison baseline   Clinic/system rollups
+        |                        |
+        +-----------+------------+
+                    |
+                    v
+              Flask API
+```
 
-The raw sources are:
-
-- large
-- schema-drifting over time
-- split across multiple public systems
-- weak on organization normalization and clinic/system relationships
-- not immediately usable for application-style search
-
-If the goal is to answer questions such as:
-
-- "Which cardiologists are near this city?"
-- "Which providers are affiliated with this hospital?"
-- "Which hospital locations belong to this organization?"
-- "What website or system homepage is associated with this hospital?"
-
-then raw CMS files alone are not enough. They need to be downloaded, split, normalized, enriched, and indexed into a search-friendly representation.
-
-## Approach
-
-The repo is structured around two tracks.
-
-### 1. Current API track: NPI/NPPES -> processed parquet -> Flask API
-
-This is the path the API uses today.
-
-- `scripts/npi_registry_dump.py` downloads the official NPPES dissemination file from CMS and splits it into separate individual and organization parquet files.
-- `scripts/process_npi.py` enriches those parquet files with fields such as entity mapping, website mapping, provider counts, geocoding, and metadata tracking.
-- `src/api.py` loads the newest processed individual and organization parquet files and exposes search endpoints for providers and hospitals.
-
-The API prefers:
-
-- `data/processed_data/npi_individuals_processed_*.parquet`
-- `data/processed_data/npi_organizations_processed_*.parquet`
-
-and falls back to the corresponding raw split parquet files under `data/parquet/` if the processed versions are not available.
-
-### 2. Parallel enrichment track: PPEF / PECOS / HGI
-
-This is the newer mapping-oriented workflow in `scripts/`, designed to improve affiliation quality and organization modeling.
-
-- `scripts/ppef_dump.py` and `scripts/pecos_dump.py` pull newer public enrollment-style source data
-- `scripts/process_individuals.py` builds enriched individual rows and scored affiliation links
-- `scripts/process_orgs.py` builds clinic/system-style organization entities and enriches them with provider counts and website signals
-- `scripts/hgi_dump.py` and `scripts/process_hgi.py` bring in hospital/system enrichment data
-
-This path is important architecturally, but it is not yet the primary input source for the Flask API.
-
-## Outcome
-
-The repo already delivers a working local API on top of processed public provider data.
-
-Current outcome:
-
-- provider search by location, specialty, state, ZIP, hospital, and provider name
-- provider lookup by NPI
-- hospital search by location and hospital name
-- taxonomy keyword/code lookup
-- health endpoint showing dataset load state
-
-Pipeline outcome:
-
-- raw CMS downloads stored under `data/raw/`
-- split parquet outputs under `data/parquet/`
-- enriched API-ready artifacts under `data/processed_data/`
-- metadata and caches that support resumable processing and enrichment workflows
-
-In short, the project is already useful as a searchable public-provider API, while also serving as a staging ground for better clinic/system mapping logic.
+The API defaults to the `current_active_primary` provider view and canonical PECOS clinic/system rollups. The older NPPES-only API path remains available as a fallback.
 
 ## Repository Layout
 
 ```text
-unified-public-provider-api/
-  data/
-    raw/              downloaded source files
-    parquet/          split and converted parquet datasets
-    processed_data/   enriched outputs used by the API and mapping workflows
-    hashes/           processing caches and hash/state files
-    meta/             schema and processing metadata
-  scripts/
-    npi_registry_dump.py
-    process_npi.py
-    ppef_dump.py
-    pecos_dump.py
-    process_individuals.py
-    process_orgs.py
-    hgi_dump.py
-    process_hgi.py
-  src/
-    api.py
-    API_REFERENCE.md
-    gunicorn_config.py
-  tests/
-    test_api.py
-    compare_provider_data.py
-    provider_compare_methodology.md
-  requirements.txt
+data/
+  config/                 reviewed, public-safe normalization inputs
+  raw/                    downloaded source files, ignored by Git
+  parquet/                converted source parquet, ignored by Git
+  processed_data/         enriched outputs, ignored by Git
+  analysis/               aggregate analysis outputs, ignored by Git
+scripts/
+  cms_enrollment_common.py
+  ppef_dump.py
+  pecos_dump.py
+  process_individuals.py
+  process_orgs.py
+  analyze_cms_baseline.py
+src/
+  api.py
+  data_store.py
+  API_REFERENCE.md
+tests/
+docs/
 ```
 
-## API Surface
+## Environment Setup
 
-The Flask API exposes:
-
-- `GET /api/health`
-- `GET /api/taxonomy/codes`
-- `GET /api/providers/<npi>`
-- `GET /api/providers/search/location`
-- `GET /api/providers/search/specialty`
-- `GET /api/providers/search/state/<state_code>`
-- `GET /api/providers/search/postal_code/<postal_code>`
-- `GET /api/providers/search/hospital`
-- `GET /api/providers/search/name`
-- `GET /api/hospitals/search/location`
-- `GET /api/hospitals/search/name`
-
-See [src/API_REFERENCE.md](src/API_REFERENCE.md) for endpoint-level examples and response shapes.
-
-## Quick Start
-
-Use Python 3.10+.
+Use Python 3.10 or newer.
 
 ```bash
 python -m venv .venv
@@ -141,53 +73,89 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Optional environment variables:
+For development and tests:
 
 ```bash
-export DATA_DIR=data
-export API_HOST=0.0.0.0
-export API_PORT=5000
-export FLASK_ENV=development
-export MAX_RESULTS_DEFAULT=50
-export MAX_RESULTS_LIMIT=500
-export GUNICORN_BIND=0.0.0.0:5000
-export GUNICORN_WORKERS=2
+pip install -r requirements-dev.txt
 ```
 
-If taxonomy descriptions are missing, generate them locally:
+## Build The CMS Data
 
-```bash
-python scripts/create_specialty_lookup.py
-```
-
-## Current API Workflow
-
-### 1. Download and split NPI/NPPES data
+### 1. Download NPI Registry Data
 
 ```bash
 python scripts/npi_registry_dump.py
 ```
 
-This creates split parquet files such as:
+This creates individual and organization parquet files under `data/parquet/`.
 
-- `data/parquet/npi_individuals_YYYYMMDD.parquet`
-- `data/parquet/npi_organizations_YYYYMMDD.parquet`
-
-### 2. Build processed API inputs
+### 2. Download CMS Enrollment Assets
 
 ```bash
-python scripts/process_npi.py
+python scripts/ppef_dump.py
+python scripts/pecos_dump.py
 ```
 
-Useful modes in the current workflow include:
+The dump scripts resolve the current CMS catalog distribution, download enrollment/reassignment/practice-location assets, handle common CSV encodings, and convert them to parquet.
 
-- `entity_mapping`
-- `website_mapping_osm` or `website_mapping_overpass`
-- `provider_count`
+### 3. Process Organizations
 
-That step produces the processed parquet files the API prefers to load.
+```bash
+python scripts/process_orgs.py npi_enrichment
+```
 
-### 3. Start the API
+Organization processing:
+
+- enriches PECOS rows with NPI organization fields
+- creates deterministic clinic and system identifiers
+- canonicalizes names and locations
+- writes clinic and system rollups
+- applies approved alias controls when configured
+- adds generic-name, duplicate-address, and rollup-quality diagnostics
+
+Optional organization enrichment modes include `hgi_enrichment`, `provider_count`, and `website_mapping`.
+
+### 4. Process Individuals
+
+```bash
+python scripts/process_individuals.py npi_enrichment
+python scripts/process_individuals.py clinic_mapping
+python scripts/process_individuals.py quality_exports
+```
+
+Individual processing:
+
+- enriches PPEF identities and contact fields with NPI Registry data
+- normalizes taxonomy into specialty and provider-type groups
+- builds scored provider-to-clinic/system affiliation candidates
+- selects a primary affiliation using active relationships, recency, continuity, and corroborating location signals
+- records confidence, ambiguity, provenance, and currentness metadata
+- writes analysis-ready baseline views and quality audits
+
+Run `python scripts/process_individuals.py all` when all prerequisites are already available.
+
+### 5. Add Provider Counts To Organizations
+
+```bash
+python scripts/process_orgs.py provider_count
+```
+
+This counts unique mapped providers at clinic and system levels and refreshes the rollups.
+
+See [docs/CMS_PIPELINE.md](docs/CMS_PIPELINE.md) for detailed artifact and sequencing notes.
+
+## Baseline Views
+
+`ppef_individuals_comparison_baseline_YYYYMMDD.parquet` contains several explicit views:
+
+- `current_active_primary`: one high-confidence, non-ambiguous active primary affiliation per provider; default API view
+- `clean_primary`: strict primary-affiliation sensitivity view
+- `all_mapped`: broader mapped-provider coverage view
+- `candidate_graph`: expanded provider-affiliation candidates for analytical use, not API serving
+
+The API requires its selected view to contain one nonblank provider ID and NPI per row with no duplicates.
+
+## Run The API
 
 Development:
 
@@ -201,57 +169,94 @@ Production-style:
 gunicorn -c src/gunicorn_config.py src.api:app
 ```
 
-`src/gunicorn_config.py` is tuned for large in-memory datasets and loads provider data per worker.
+Common endpoints:
 
-## Parallel Mapping Workflow
-
-For the newer PPEF/PECOS/HGI path, the recommended sequence is:
-
-```bash
-python scripts/pecos_dump.py
-python scripts/ppef_dump.py
-python scripts/process_orgs.py npi_enrichment
-python scripts/process_orgs.py hgi_enrichment
-python scripts/process_individuals.py all
-python scripts/process_orgs.py provider_count
-python scripts/process_orgs.py website_mapping
+```text
+GET /api/health
+GET /api/providers/{npi}
+GET /api/providers/search/name
+GET /api/providers/search/specialty
+GET /api/providers/search/location
+GET /api/providers/search/hospital
+GET /api/clinics/search/name
+GET /api/clinics/search/location
+GET /api/systems/search/name
+GET /api/systems/search/location
+GET /api/hospitals/search/name
+GET /api/hospitals/search/location
 ```
 
-This path produces artifacts such as:
+See [src/API_REFERENCE.md](src/API_REFERENCE.md) for query parameters and response examples.
 
-- `pecos_orgs_processed_YYYYMMDD.parquet`
-- `ppef_individuals_processed_YYYYMMDD.parquet`
-- `ppef_individual_affiliation_links_YYYYMMDD.parquet`
-- `hgi_processed_YYYYMMDD.parquet`
+### API Configuration
 
-## Data Quality and Evaluation
+```bash
+export DATA_DIR=data
+export API_DATA_SOURCE=cms
+export CMS_BASELINE_VIEW=current_active_primary
+export ALLOW_LEGACY_NPI_FALLBACK=true
+export API_HOST=0.0.0.0
+export API_PORT=5000
+export MAX_RESULTS_DEFAULT=50
+export MAX_RESULTS_LIMIT=500
+```
 
-The repo also includes evaluation utilities in `tests/`:
+Optional explicit file overrides:
 
-- `tests/test_api.py` exercises the API endpoints against a running local server
-- `tests/compare_provider_data.py` compares provider outputs against curated datasets
-- `tests/provider_compare_methodology.md` documents the matching, scoping, and scoring methodology used for those comparisons
+- `CMS_PROVIDER_PATH`
+- `CMS_CLINIC_PATH`
+- `CMS_SYSTEM_PATH`
 
-That makes the project more than just an API wrapper. It also includes tooling for validating retrieval quality and affiliation quality as the pipeline evolves.
+Set `API_DATA_SOURCE=legacy_npi` to use the older processed NPPES files directly.
 
-## Current Limitations
+## Aggregate CMS Analysis
 
-- The Flask API currently serves the legacy processed NPI/NPPES datasets, not the newer PPEF/PECOS outputs.
-- Several pipeline scripts are interactive or mode-driven, so the full workflow is not yet a fully declarative batch pipeline.
-- Public CMS schemas can drift, and fresh source releases may require adjustments in the dump or processing scripts.
-- The API reads large parquet datasets into memory, which is simple and fast for local use but not a full distributed serving architecture.
-- The parallel PPEF/PECOS/HGI workflow is clearly in progress and should be treated as an evolving enrichment path rather than a finalized production cutover.
+Generate aggregate, non-row-level baseline analysis with:
 
-## Why This Repo Is Interesting
+```bash
+python scripts/analyze_cms_baseline.py
+```
 
-This repo sits at the intersection of data engineering, public-data normalization, and applied API design.
+The analyzer writes ignored artifacts under `data/analysis/`:
 
-It is not just a Flask service. It is a full workflow for:
+- baseline summary in JSON and Markdown
+- provider counts and completeness by state
+- high-volume specialty groups
+- high-volume mapped systems
+- organization rollup quality totals
 
-- acquiring public healthcare provider data
-- reshaping it into analysis- and application-friendly formats
-- enriching it with hospital, website, and affiliation signals
-- exposing it through queryable endpoints
-- measuring how well the resulting mappings hold up against reference datasets
+No row-level provider data is emitted by this analyzer.
 
-That makes it a strong foundation for provider search, open-scheduling discovery, clinic/system resolution, and future healthcare-directory products built on public data.
+## Durable Configuration
+
+`data/config/specialty_rollup.csv` maps CMS/NUCC taxonomy descriptions and codes into normalized specialties, specialty groups, and provider-type groups.
+
+`data/config/pecos_system_alias_overrides.csv` is an intentionally empty template. Add reviewed overrides locally and commit only decisions suitable for public release. Supported actions are implemented by `process_orgs.py`; unapproved rows do not affect canonical mappings.
+
+## Tests
+
+```bash
+python -m pytest tests/test_api.py tests/test_cms_enrollment_common.py
+python -m py_compile src/*.py scripts/*.py
+```
+
+The API tests use synthetic parquet fixtures and Flask's test client. CMS download tests mock catalog responses and do not require production data.
+
+## Data And Git Hygiene
+
+CMS source files and generated parquet datasets can be large. The repository intentionally ignores:
+
+- downloaded raw assets
+- converted and processed parquet files
+- generated quality and analysis outputs
+- caches, hashes, logs, and local environment files
+
+Commit source code, documentation, public-safe configuration, and small synthetic fixtures only.
+
+## Limitations
+
+- CMS source schemas and distribution URLs can change; catalog discovery and schema warnings reduce but do not eliminate maintenance.
+- Enrollment and reassignment relationships are administrative signals, not a guarantee that a provider is currently accepting patients at a location.
+- Clinic and system mapping is probabilistic when authoritative identifiers are absent. Confidence and ambiguity fields should remain visible to downstream users.
+- Organization websites are optional enrichments and may not be available for every rollup.
+- The in-memory Flask implementation is intended for local and moderate-scale use. High-concurrency deployments should materialize search indexes or use a database/search service.
